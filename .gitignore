@@ -1,0 +1,9 @@
+build/
+*.exe
+*.obj
+*.lib
+*.pdb
+*.ilk
+.vs/
+timeline.csv
+test_timeline.csv
