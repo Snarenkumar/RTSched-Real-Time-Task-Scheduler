@@ -5,7 +5,100 @@
 
 ---
 
-## 1. The 10-Second Elevator Pitch
+## 0. Clearing Up the #1 Confusion: "Does this schedule my actual Windows OS?"
+
+**NO! It does NOT touch, modify, or control your Windows operating system.**
+
+* **Your Windows OS** already has its own scheduler inside the Windows Kernel. Windows decides when Google Chrome, Spotify, or VS Code gets the CPU.
+* **This project (`RTSched`) is a standalone C++ application / simulation engine.** 
+  * It creates its own internal queue of tasks.
+  * It runs on a standard C++ thread (`std::thread`).
+  * It simulates what an **RTOS (Real-Time Operating System)** like FreeRTOS, VxWorks, or QNX does inside a spacecraft, car, or robot.
+* **Why did we build it this way?** 
+  Because modifying the Windows kernel requires writing dangerous device drivers that can blue-screen your PC. By writing a real-time scheduler in user-space C++, we can safely simulate, test, measure jitter in microseconds, inject faults, and visualize timelines without risking your computer!
+
+---
+
+## 1. What are Classes, Objects, and Tests? (Beginner Breakdown)
+
+If you saw `tests.cpp` and wondered *"What are these things? Are they classes? Are they objects?"*, here is the exact breakdown:
+
+### A. The Classes & Structs (The Blueprints)
+A class or struct in C++ is like an **architectural blueprint for a house**. It defines what data something has and what functions it can perform:
+1. **`struct Task`** ([task.h](file:///f:/main%20servers%20under%20productions/RTSched/include/rtsched/task.h)): The blueprint for a task definition. It stores `name`, `period_ms`, `wcet_ms`, `deadline_ms`.
+2. **`struct Job`** ([policy.h](file:///f:/main%20servers%20under%20productions/RTSched/include/rtsched/policy.h)): When a task arrives at time $t=50\text{ms}$, it creates a `Job` (instance #1, instance #2, etc.).
+3. **`struct JobComparator`** ([policy.h](file:///f:/main%20servers%20under%20productions/RTSched/include/rtsched/policy.h)): The comparison rule. It answers: *"Between Job A and Job B, who gets the CPU first?"*
+4. **`class DeadlineMonitor`** ([monitor.h](file:///f:/main%20servers%20under%20productions/RTSched/include/rtsched/monitor.h)): The referee/scorekeeper. Whenever a job finishes, it records: *Did it miss the deadline? How many milliseconds was it delayed?*
+5. **`class Watchdog`** ([watchdog.h](file:///f:/main%20servers%20under%20productions/RTSched/include/rtsched/watchdog.h)): The security guard. A separate background thread that rings an alarm if any job takes longer than its promised time.
+6. **`class Scheduler`** ([scheduler.h](file:///f:/main%20servers%20under%20productions/RTSched/include/rtsched/scheduler.h)): The overall engine. It holds the task list, runs the priority queue, and dispatches threads.
+
+### B. The Objects (The Actual Things Created from Blueprints)
+An **object** is an actual instance made from a blueprint:
+```cpp
+Task t1("Radar", 50, 10);     // 't1' is an OBJECT of type Task
+DeadlineMonitor mon;          // 'mon' is an OBJECT of type DeadlineMonitor
+Scheduler sched(tasks, RM);   // 'sched' is an OBJECT of type Scheduler
+```
+
+### C. What is a "Test"? (`TEST(...)` in GoogleTest)
+When you see:
+```cpp
+TEST(TaskTest, DefaultDeadlineToPeriod) {
+    Task t("T1", 50, 10);
+    EXPECT_EQ(t.deadline_ms, 50);
+}
+```
+* **`TEST(...)`** is a GoogleTest macro that creates an automated testing function.
+* You don't have to call it manually. When you run `.\build\Release\rtsched_tests.exe`, GoogleTest runs all 25 test functions one after another.
+* **`EXPECT_EQ(a, b)`** checks: *"Is `a` equal to `b`?"* If yes, green checkmark. If no, it reports a red failure.
+
+---
+
+## 2. Walkthrough of a Sample Test: Step-by-Step
+
+Let's look at **Test 5.1** from [tests/tests.cpp](file:///f:/main%20servers%20under%20productions/RTSched/tests/tests.cpp#L258-L271) to see exactly how a test works:
+
+```cpp
+TEST(IntegrationTest, SchedulerExecution) {
+    // STEP 1: CREATE INPUT DATA (Objects)
+    std::vector<Task> tasks = {
+        Task("T1", 50, 5),   // Task 1: Repeats every 50ms, runs for 5ms
+        Task("T2", 100, 5)   // Task 2: Repeats every 100ms, runs for 5ms
+    };
+
+    // STEP 2: CREATE THE SCHEDULER OBJECT
+    // Tell it to use Policy::RM (Rate-Monotonic: shorter period runs first)
+    Scheduler sched(tasks, Policy::RM);
+
+    // STEP 3: RUN THE SCHEDULER FOR 250 MILLISECONDS
+    // A background thread wakes up, tracks time, releases jobs, and runs them
+    sched.run_for(250);
+
+    // STEP 4: INSPECT THE RESULTS (Output from Monitor)
+    const auto summaries = sched.get_monitor().get_summaries();
+
+    // STEP 5: VERIFY WITH ASSERTIONS (Did it do what we expect?)
+    // In 250ms, a task with period 50ms should have run at least 3 to 5 times:
+    EXPECT_GE(summaries[0].jobs_run, 3);
+    
+    // In 250ms, a task with period 100ms should have run at least 1 to 2 times:
+    EXPECT_GE(summaries[1].jobs_run, 1);
+}
+```
+
+### What happens inside the computer during those 250ms?
+1. At **$t = 0\text{ms}$**: Both `T1` and `T2` enter the Ready Queue.
+2. Because `T1`'s period is 50ms and `T2`'s is 100ms, `T1` has higher priority.
+3. The scheduler executes `T1` from $0$ to $5\text{ms}$.
+4. At **$t = 5\text{ms}$**: `T1` is done. `T2` runs from $5$ to $10\text{ms}$.
+5. From $10$ to $50\text{ms}$, CPU is idle.
+6. At **$t = 50\text{ms}$**: `T1` arrives again and runs until $55\text{ms}$.
+7. At **$t = 100\text{ms}$**: Both `T1` and `T2` arrive again! `T1` runs first, then `T2`.
+8. At **$t = 250\text{ms}$**: The run stops. The test checks: did `T1` run at least 3 times? Yes (ran 5 times). Did `T2` run at least once? Yes (ran 2 times). The test **PASSES**!
+
+---
+
+## 3. The 10-Second Real-World Elevator Pitch
 
 Imagine an **airplane autopilot** or a **self-driving car**:
 * Every **50 milliseconds**, it must read the camera and obstacle sensors.
@@ -24,7 +117,7 @@ You give it a list of real-world jobs with deadlines, and it:
 
 ---
 
-## 2. What is the INPUT? (What you feed into it)
+## 4. What is the INPUT? (What you feed into it)
 
 The input is simply a list of tasks you want the computer to run periodically.
 
@@ -42,18 +135,9 @@ The input is simply a list of tasks you want the computer to run periodically.
   * **`EDF` (Earliest Deadline First)**: "Whoever's deadline is closest right now gets the CPU first." (Dynamic rule).
 * **`duration_ms`**: How long to run the simulation? (e.g., `1000 ms` = 1 second).
 
-### Exact Code Example of Input:
-```cpp
-std::vector<Task> tasks = {
-    Task("T1_Sensor",   50, 10),   // Repeats every 50ms, takes 10ms CPU
-    Task("T2_Steering", 100, 20),  // Repeats every 100ms, takes 20ms CPU
-    Task("T3_Display",  200, 40)   // Repeats every 200ms, takes 40ms CPU
-};
-```
-
 ---
 
-## 3. What is the OUTPUT? (What you see on the screen & file)
+## 5. What is the OUTPUT? (What you see on the screen & file)
 
 When you run the program, it produces **4 clear outputs**:
 
@@ -72,9 +156,9 @@ After running for 1 second, it prints a scorecard of every task:
 =================== TIMING MONITOR SUMMARY ===================
 Task      Jobs      Misses    Avg Jitter(ms) Max Jitter(ms) Overruns  
 --------------------------------------------------------------
-T1        20        0         0.15           1.00           0         
-T2        10        0         10.20          11.00          0         
-T3        5         0         30.10          31.00          0         
+T1        20        0         10.50          27             0         
+T2        10        0         13.80          17             0         
+T3        5         0         34.80          37             0         
 ==============================================================
 ```
 * **Jobs**: How many times each task ran (e.g., T1 ran 20 times in 1000ms because 1000 / 50 = 20).
@@ -86,9 +170,9 @@ T3        5         0         30.10          31.00          0
 It draws a character-by-character timeline of who was using the CPU:
 ```
 Execution Gantt Chart (1 char = 5 ms):
-T1      |##........##........##........##........|
-T2      |..####......####......####..............|
-T3      |......########..........########........|
+T1      |##............##....###........###.......##............##...|
+T2      |..####................#####................####.............|
+T3      |......########.................................########.....|
 ```
 * `#` = Task is running right now on the CPU.
 * `.` = Task is idle, waiting, or asleep.
@@ -105,7 +189,7 @@ T1,50,60
 
 ---
 
-## 4. The Math Formulas: Why do we have them & what do they calculate?
+## 6. The Math Formulas: Why do we have them & what do they calculate?
 
 Why do we need math before running tasks? **Because you never want an airplane or car to start driving if the CPU is guaranteed to freeze!**
 
@@ -117,7 +201,7 @@ $$\text{Utilization } (U) = \sum \frac{\text{Execution Time } (C_i)}{\text{Perio
 * $C_i$ = Worst-case execution time (how long it runs).
 * $T_i$ = Period (how often it repeats).
 
-#### Step-by-Step Calculation with our example:
+#### Step-by-Step Calculation:
 * **Task 1**: Takes 10ms every 50ms $\rightarrow \frac{10}{50} = 0.20$ (20% CPU)
 * **Task 2**: Takes 20ms every 100ms $\rightarrow \frac{20}{100} = 0.20$ (20% CPU)
 * **Task 3**: Takes 40ms every 200ms $\rightarrow \frac{40}{200} = 0.20$ (20% CPU)
@@ -154,7 +238,6 @@ $$\text{EDF Bound} = \mathbf{1.00} \text{ (100\%)}$$
 ---
 
 ### Formula 4: Timing Metrics (How good is the execution?)
-During and after execution, the monitor measures:
 1. **Release Jitter**: 
    $$\text{Jitter} = \text{Actual Start Time} - \text{Scheduled Release Time}$$
    *(How long a task sat in line waiting before the CPU picked it up).*
@@ -167,70 +250,7 @@ During and after execution, the monitor measures:
 
 ---
 
-## 5. Step-by-Step: How the Code Processes Everything
-
-Here is the exact step-by-step journey of what happens inside the code when you click Run:
-
-```mermaid
-flowchart TD
-    A["1. You provide tasks (T1, T2, T3)"] --> B["2. Admission Control (Calculate U and Bound)"]
-    B -->|U <= Bound| C["ACCEPTED: Start Scheduler"]
-    B -->|U > Bound| D["REJECTED: CPU may choke!"]
-    C --> E["3. Clock starts ticking (Base Time = 0ms)"]
-    E --> F["4. Release Generator: Jobs arrive when their period hits"]
-    F --> G["5. Ready Queue: Sort jobs (RM: shortest period | EDF: earliest deadline)"]
-    G --> H["6. Dispatcher: Take top job from Queue"]
-    H --> I["7. Watchdog Timer: Arm countdown alarm"]
-    I --> J["8. Worker Thread: Executes the task code"]
-    J --> K["9. Watchdog Disarmed & Metrics Logged"]
-    K --> L{"Is simulation finished?"}
-    L -- No --> F
-    L -- Yes --> M["10. Print Summary Table + ASCII Gantt + Export CSV"]
-```
-
-### Detailed Breakdown of the Steps:
-
-#### Step 1: The Input Handshake
-In `src/main.cpp`, you define your tasks and hand them to `Scheduler`.
-
-#### Step 2: Admission Control (`src/policy.cpp`)
-The function `check_admission()` runs. It adds up all $C_i / T_i$. If under the bound, it greenlights the run.
-
-#### Step 3: Clock Starts & Job Release (`src/scheduler.cpp`)
-A background thread starts. At time $t = 0\text{ ms}$:
-* `T1` arrives (Job 1)
-* `T2` arrives (Job 1)
-* `T3` arrives (Job 1)
-All 3 jobs are placed into the **Ready Queue**.
-
-#### Step 4: Priority Sorting (`src/policy.cpp`)
-The Ready Queue uses `JobComparator`:
-* Under **Rate-Monotonic (RM)**:
-  * `T1` has period 50ms (runs fastest $\rightarrow$ **Highest Priority #1**)
-  * `T2` has period 100ms $\rightarrow$ **Priority #2**
-  * `T3` has period 200ms $\rightarrow$ **Priority #3**
-* Result: `T1` gets the CPU first!
-
-#### Step 5: Execution & Watchdog (`src/watchdog.cpp`)
-Before `T1` starts running:
-* The **Watchdog** is notified: *"T1 is starting, it should take 10ms."*
-* If T1 hangs and takes 50ms, a separate Watchdog thread wakes up, triggers an alert, and executes a recovery routine.
-* When T1 finishes normally at $10\text{ms}$, the Watchdog is disarmed.
-
-#### Step 6: Next in Line
-* At $t = 10\text{ms}$, `T1` is done. `T2` gets the CPU (runs from $10$ to $30\text{ms}$).
-* At $t = 30\text{ms}$, `T2` is done. `T3` gets the CPU (runs from $30$ to $50\text{ms}$).
-* At $t = 50\text{ms}$, `T1` arrives again! Because `T1` has higher priority, it runs immediately.
-
-#### Step 7: Final Reporting (`src/monitor.cpp` & `src/gantt.cpp`)
-When the run finishes:
-* `DeadlineMonitor` counts up all jitter, misses, and execution times.
-* `print_text_gantt()` draws the `#` and `.` ASCII timeline.
-* `export_timeline_csv()` writes rows to `timeline.csv`.
-
----
-
-## 6. The 4 Demo Scenarios Built Into the Project
+## 7. The 4 Demo Scenarios Built Into the Project
 
 When you test the program, it has 4 pre-made scenarios to prove each feature:
 
@@ -243,7 +263,7 @@ When you test the program, it has 4 pre-made scenarios to prove each feature:
 
 ---
 
-## 7. Quick Summary Cheat-Sheet
+## 8. Quick Summary Cheat-Sheet
 
 * **Input**: A list of periodic tasks (Name, Repeat Interval, Computation Workload, Deadline).
 * **Formula**: $U = \sum (C_i / T_i)$ must be $\le \text{Bound}$ (78% for RM 3-tasks, 100% for EDF).
